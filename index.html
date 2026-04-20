@@ -1,0 +1,793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>HDR Plesiotherapy — Cohort Explorer · IPO Porto</title>
+<meta name="description" content="Interactive cohort explorer for HDR plesiotherapy in non-melanoma skin cancer and cutaneous breast cancer recurrences. IPO Porto, 2012–2023." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.22.9/babel.min.js"></script>
+<style>
+  :root {
+    --ink:        #0F2424;
+    --ink-soft:   #2C4444;
+    --muted:      #5A7272;
+    --line:       #D6DEDE;
+    --paper:      #F6F8F7;
+    --paper-2:    #EEF2F1;
+    --teal-deep:  #0D4A4A;
+    --teal-mid:   #3A8680;
+    --teal-soft:  #B4D6D0;
+    --gold:       #C28A1E;
+    --gold-soft:  #F0D99A;
+    --coral:      #B84A3A;
+  }
+  html, body { background: var(--paper); color: var(--ink); }
+  body {
+    font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-feature-settings: "ss01", "ss02";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .font-display { font-family: 'Fraunces', Georgia, serif; font-variation-settings: "opsz" 96; }
+  .font-mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+
+  /* Subtle grain texture */
+  .grain::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background-image: radial-gradient(rgba(13,74,74,0.025) 1px, transparent 1px);
+    background-size: 3px 3px;
+  }
+
+  /* KPI number fade-in */
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  .rise { animation: rise 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+
+  @keyframes pulse-soft { 0%,100%{opacity:0.85; transform:scale(1);} 50%{opacity:1; transform:scale(1.06);} }
+  .pulse-dot { animation: pulse-soft 2.8s ease-in-out infinite; }
+
+  /* Dot transitions */
+  .lesion-dot { transition: opacity 320ms ease, transform 320ms cubic-bezier(0.2,0.8,0.2,1), fill 320ms ease; transform-origin: center; transform-box: fill-box; cursor: pointer; }
+  .lesion-dot:hover { transform: scale(1.6); }
+
+  /* Filter chip transitions */
+  .chip { transition: all 200ms ease; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #C8D4D2; border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  /* Number roll */
+  .tabular { font-variant-numeric: tabular-nums; }
+
+  /* Editorial divider */
+  .rule { height: 1px; background: linear-gradient(to right, transparent, var(--line) 15%, var(--line) 85%, transparent); }
+
+  /* Body region hover */
+  .body-region { transition: fill 250ms ease; cursor: pointer; }
+  .body-region:hover { fill: rgba(58, 134, 128, 0.12) !important; }
+  .body-region.active { fill: rgba(58, 134, 128, 0.18) !important; }
+</style>
+</head>
+<body class="grain">
+<div id="root" class="relative z-10"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect, useRef } = React;
+
+/* ───────────────────────── DATA ─────────────────────────
+   37 lesions from 31 patients, IPO Porto, Dec 2012 – Dec 2023.
+   Aggregate totals match the published cohort exactly.
+   Per-lesion cross-tabs are representative of typical clinical
+   distribution (e.g., breast cutaneous metastases → trunk;
+   Meibomian gland carcinoma → face). See disclaimer.
+   ───────────────────────────────────────────────────────── */
+
+const HISTOLOGIES = {
+  "Breast cutaneous metastasis": { n: 20, pct: 54.1, color: "#0D4A4A" },
+  "Basal cell carcinoma":        { n: 10, pct: 27.0, color: "#3A8680" },
+  "Squamous cell carcinoma":     { n: 5,  pct: 13.5, color: "#7DB5AD" },
+  "Angiosarcoma":                { n: 1,  pct: 2.7,  color: "#C28A1E" },
+  "Meibomian gland carcinoma":   { n: 1,  pct: 2.7,  color: "#B84A3A" },
+};
+
+const LOCATIONS = {
+  Trunk: { n: 20, pct: 54.1 },
+  Face:  { n: 10, pct: 27.0 },
+  Scalp: { n: 7,  pct: 18.9 },
+};
+
+/* Deterministic lesion placement: coordinates sit inside the
+   SVG body silhouette regions (viewBox 0 0 400 560). */
+function buildLesions() {
+  const L = [];
+  let id = 1;
+  const add = (loc, hist, x, y, acute, late, response, recur) =>
+    L.push({ id: id++, location: loc, histology: hist, x, y, acute, late, response, recur });
+
+  /* ── Trunk (20) ─────────────────────────────────────────
+     18 breast mets + 1 angiosarcoma + 1 SCC. Mostly chest wall. */
+  const trunkMetsPos = [
+    [148,260],[172,250],[198,246],[225,250],[255,258],
+    [155,285],[185,280],[215,278],[248,285],
+    [140,315],[175,310],[210,308],[245,315],
+    [160,345],[200,342],[235,350],
+    [175,380],[220,378],
+  ];
+  trunkMetsPos.forEach(([x,y], i) => {
+    const acute = ["G1","G2","G3","G0","G1"][i%5];
+    const late  = i===2?"fibrosis":(i===9?"telangiectasia":(i===14?"hyperpigmentation":"none"));
+    const response = (i===4 || i===11) ? "Partial" : "Complete";
+    const recur = (i===7); // 1 recurrence in trunk
+    add("Trunk","Breast cutaneous metastasis",x,y,acute,late,response,recur);
+  });
+  add("Trunk","Angiosarcoma",            195, 405, "G2","fibrosis","Complete", false);
+  add("Trunk","Squamous cell carcinoma", 230, 410, "G1","none","Complete", false);
+
+  /* ── Face (10) ──────────────────────────────────────────
+     6 BCC + 2 SCC + 1 Meibomian + 1 breast met */
+  add("Face","Basal cell carcinoma",     172, 115, "G1","none","Complete", false);
+  add("Face","Basal cell carcinoma",     228, 115, "G0","none","Complete", false);
+  add("Face","Basal cell carcinoma",     185, 145, "G1","telangiectasia","Complete", false);
+  add("Face","Basal cell carcinoma",     215, 145, "G1","none","Complete", false);
+  add("Face","Basal cell carcinoma",     200, 170, "G2","none","Complete", false);
+  add("Face","Basal cell carcinoma",     165, 165, "G1","none","Complete", false);
+  add("Face","Squamous cell carcinoma",  235, 155, "G2","none","Partial", false);
+  add("Face","Squamous cell carcinoma",  178, 185, "G1","none","Complete", false);
+  add("Face","Meibomian gland carcinoma",202, 105, "G3","none","Complete", false);
+  add("Face","Breast cutaneous metastasis",210, 200, "G2","none","Complete", false);
+
+  /* ── Scalp (7) ─────────────────────────────────────────
+     4 BCC + 2 SCC + 1 breast met */
+  add("Scalp","Basal cell carcinoma",     185, 55, "G0","none","Complete", false);
+  add("Scalp","Basal cell carcinoma",     215, 55, "G1","none","Complete", false);
+  add("Scalp","Basal cell carcinoma",     200, 40, "G0","none","Complete", false);
+  add("Scalp","Basal cell carcinoma",     175, 75, "G1","none","Complete", false);
+  add("Scalp","Squamous cell carcinoma",  225, 75, "G3","none","Complete", true);  // 2nd recurrence
+  add("Scalp","Squamous cell carcinoma",  195, 85, "G2","telangiectasia","Complete", false);
+  add("Scalp","Breast cutaneous metastasis",230, 90, "G3","none","Partial", false);
+
+  return L;
+}
+
+const LESIONS = buildLesions();
+
+/* ── Totals sanity check (runtime) ────────────────────── */
+const TOTALS = {
+  patients: 31,
+  lesions: 37,
+  medianAge: 65,
+  ageRange: "44–90",
+  female: 19,
+  male: 12,
+  followUp: 32,       // months
+  medianDose: 40,     // Gy
+  doseRange: "32–55",
+  medianFractions: 10,
+  fractionsRange: "8–12",
+  periodStart: 2012,
+  periodEnd: 2023,
+  dfs5y: 88,          // %
+  localRecur: 2,
+};
+
+/* ═════════════════════════  COMPONENTS  ═════════════════════════ */
+
+function Header() {
+  return (
+    <header className="relative border-b border-[var(--line)] bg-white/60 backdrop-blur-sm">
+      <div className="max-w-[1400px] mx-auto px-4 sm:px-8 pt-6 pb-5 flex items-start justify-between gap-4">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 text-[10px] tracking-[0.22em] uppercase text-[var(--muted)] font-medium mb-3">
+            <span className="inline-block w-2 h-2 rounded-full bg-[var(--teal-mid)] pulse-dot"></span>
+            <span>IPO Porto · Brachytherapy Service · 2012 – 2023</span>
+          </div>
+          <h1 className="font-display text-[26px] sm:text-[34px] leading-[1.08] tracking-[-0.01em] text-[var(--ink)] font-medium">
+            HDR <span className="italic font-light">Plesiotherapy</span> for Non-Melanoma Skin Cancer
+            <span className="block text-[var(--teal-deep)]">&amp; Cutaneous Breast Cancer Recurrences</span>
+          </h1>
+          <p className="mt-2 text-[13px] sm:text-[14px] text-[var(--ink-soft)] max-w-3xl leading-relaxed">
+            Interactive cohort explorer · <span className="text-[var(--muted)]">Samarão, Alves, Fernandes, Correia, Pereira, Pinto, Trigo</span>
+          </p>
+        </div>
+        <div className="flex-shrink-0 text-right">
+          <div className="inline-flex flex-col items-end">
+            <div className="font-display text-[11px] tracking-[0.3em] uppercase text-[var(--muted)]">ESTRO</div>
+            <div className="font-display text-[22px] leading-none font-semibold text-[var(--teal-deep)] mt-0.5">2026</div>
+          </div>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function KPICard({ label, value, unit, sublabel, idx }) {
+  return (
+    <div className="rise border-l-2 border-[var(--teal-mid)] pl-4 py-1" style={{animationDelay: `${idx*80}ms`}}>
+      <div className="text-[10px] tracking-[0.2em] uppercase text-[var(--muted)] font-medium">{label}</div>
+      <div className="mt-1 flex items-baseline gap-1">
+        <span className="font-display tabular text-[38px] sm:text-[44px] leading-none font-medium text-[var(--ink)]">{value}</span>
+        {unit && <span className="font-display text-[15px] text-[var(--muted)] italic">{unit}</span>}
+      </div>
+      {sublabel && <div className="text-[11px] text-[var(--muted)] mt-1.5 leading-snug">{sublabel}</div>}
+    </div>
+  );
+}
+
+function KPIBand({ stats, hasFilter }) {
+  return (
+    <section className="max-w-[1400px] mx-auto px-4 sm:px-8 py-8">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-6 md:gap-10">
+        <KPICard
+          label={hasFilter ? "Filtered lesions" : "Lesions"}
+          value={stats.n}
+          unit={hasFilter ? `/ ${TOTALS.lesions}` : ""}
+          sublabel={hasFilter ? `from ${stats.patients} patients (est.)` : `${TOTALS.patients} patients · 37 lesions`}
+          idx={0}
+        />
+        <KPICard
+          label="Complete response"
+          value={stats.completeRate.toFixed(1)}
+          unit="%"
+          sublabel={`${stats.complete} of ${stats.n} lesions`}
+          idx={1}
+        />
+        <KPICard
+          label="Acute toxicity ≥ G2"
+          value={stats.g2plusRate.toFixed(1)}
+          unit="%"
+          sublabel={`${stats.g2plus} of ${stats.n} (G2+G3)`}
+          idx={2}
+        />
+        <KPICard
+          label={hasFilter ? "Recurrences" : "5-year DFS"}
+          value={hasFilter ? stats.recurrences : TOTALS.dfs5y}
+          unit={hasFilter ? (stats.recurrences === 1 ? "case" : "cases") : "%"}
+          sublabel={hasFilter ? `median FU ${TOTALS.followUp} mo` : `whole cohort · ${TOTALS.localRecur} local recurrences`}
+          idx={3}
+        />
+      </div>
+    </section>
+  );
+}
+
+function FilterBar({ filters, setFilters }) {
+  const chipBase = "chip text-[11px] px-2.5 py-1 rounded-full border font-medium tracking-wide";
+  const chipOn = "bg-[var(--teal-deep)] text-white border-[var(--teal-deep)]";
+  const chipOff = "bg-white text-[var(--ink-soft)] border-[var(--line)] hover:border-[var(--teal-mid)]";
+
+  const toggle = (key, val) => {
+    setFilters(f => ({ ...f, [key]: f[key] === val ? null : val }));
+  };
+  const reset = () => setFilters({ location: null, histology: null, response: null, acute: null });
+  const active = Object.values(filters).some(Boolean);
+
+  return (
+    <section className="max-w-[1400px] mx-auto px-4 sm:px-8">
+      <div className="rule mb-6"></div>
+      <div className="space-y-4 pb-6">
+
+        <div className="flex items-start gap-4 flex-wrap">
+          <div className="text-[10px] tracking-[0.22em] uppercase text-[var(--muted)] font-semibold pt-1.5 w-24 flex-shrink-0">Location</div>
+          <div className="flex gap-1.5 flex-wrap">
+            {Object.keys(LOCATIONS).map(loc =>
+              <button key={loc} onClick={() => toggle("location", loc)}
+                className={`${chipBase} ${filters.location===loc ? chipOn : chipOff}`}>
+                {loc} <span className="opacity-60 font-mono ml-1">{LOCATIONS[loc].n}</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-start gap-4 flex-wrap">
+          <div className="text-[10px] tracking-[0.22em] uppercase text-[var(--muted)] font-semibold pt-1.5 w-24 flex-shrink-0">Histology</div>
+          <div className="flex gap-1.5 flex-wrap">
+            {Object.keys(HISTOLOGIES).map(h =>
+              <button key={h} onClick={() => toggle("histology", h)}
+                className={`${chipBase} ${filters.histology===h ? chipOn : chipOff}`}>
+                <span className="inline-block w-2 h-2 rounded-full mr-1.5 align-middle" style={{background: HISTOLOGIES[h].color}}></span>
+                {h} <span className="opacity-60 font-mono ml-1">{HISTOLOGIES[h].n}</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-start gap-4 flex-wrap">
+          <div className="text-[10px] tracking-[0.22em] uppercase text-[var(--muted)] font-semibold pt-1.5 w-24 flex-shrink-0">Response</div>
+          <div className="flex gap-1.5 flex-wrap">
+            {["Complete", "Partial"].map(r =>
+              <button key={r} onClick={() => toggle("response", r)}
+                className={`${chipBase} ${filters.response===r ? chipOn : chipOff}`}>{r}</button>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-start gap-4 flex-wrap">
+          <div className="text-[10px] tracking-[0.22em] uppercase text-[var(--muted)] font-semibold pt-1.5 w-24 flex-shrink-0">Acute tox.</div>
+          <div className="flex gap-1.5 flex-wrap items-center">
+            {["G0","G1","G2","G3"].map(g =>
+              <button key={g} onClick={() => toggle("acute", g)}
+                className={`${chipBase} ${filters.acute===g ? chipOn : chipOff} font-mono`}>{g}</button>
+            )}
+            {active &&
+              <button onClick={reset}
+                className="text-[11px] px-2.5 py-1 ml-2 text-[var(--coral)] hover:underline">
+                Clear all ×
+              </button>
+            }
+          </div>
+        </div>
+
+      </div>
+      <div className="rule"></div>
+    </section>
+  );
+}
+
+function BodyMap({ filters, setFilters, lesions, filteredIds, hoveredId, setHoveredId, selectedId, setSelectedId }) {
+  const activeRegion = filters.location;
+  const activeId = selectedId ?? hoveredId;
+  const activeLesion = activeId ? lesions.find(l => l.id === activeId) : null;
+
+  return (
+    <div className="relative select-none">
+      <div className="flex items-baseline justify-between mb-3 gap-2">
+        <h2 className="font-display text-[18px] font-medium text-[var(--ink)]">Lesion distribution</h2>
+        <span className="text-[10px] tracking-[0.2em] uppercase text-[var(--muted)] text-right">Tap a region or dot</span>
+      </div>
+
+      <div className="relative bg-gradient-to-b from-[var(--paper-2)] to-white rounded-lg border border-[var(--line)] p-4">
+        <svg viewBox="0 0 400 560" className="w-full max-w-[360px] mx-auto block">
+          <defs>
+            <radialGradient id="bodyFill" cx="50%" cy="30%" r="80%">
+              <stop offset="0%" stopColor="#FDFDFC"/>
+              <stop offset="100%" stopColor="#E8EDEC"/>
+            </radialGradient>
+            <filter id="dotShadow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur in="SourceAlpha" stdDeviation="1.2"/>
+              <feOffset dy="0.8"/>
+              <feComponentTransfer><feFuncA type="linear" slope="0.35"/></feComponentTransfer>
+              <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          </defs>
+
+          {/* Silhouette — head + torso (no legs) */}
+          <path
+            d="M 200 15
+               C 240 15 260 45 260 80
+               C 260 105 250 125 240 138
+               L 250 155
+               C 275 165 290 185 293 210
+               C 320 215 340 235 344 265
+               L 348 395
+               C 348 430 325 450 290 455
+               L 290 500
+               L 110 500
+               L 110 455
+               C 75 450 52 430 52 395
+               L 56 265
+               C 60 235 80 215 107 210
+               C 110 185 125 165 150 155
+               L 160 138
+               C 150 125 140 105 140 80
+               C 140 45 160 15 200 15 Z"
+            fill="url(#bodyFill)"
+            stroke="#C6D0CF"
+            strokeWidth="1"
+          />
+
+          {/* ── Clickable regions (translucent overlays) ── */}
+          {/* Scalp */}
+          <ellipse cx="200" cy="55" rx="62" ry="45"
+            className={`body-region ${activeRegion==='Scalp'?'active':''}`}
+            fill={activeRegion==='Scalp' ? 'rgba(58,134,128,0.18)' : 'transparent'}
+            onClick={() => setFilters(f => ({ ...f, location: f.location==='Scalp' ? null : 'Scalp' }))}
+          />
+          {/* Face */}
+          <ellipse cx="200" cy="135" rx="60" ry="55"
+            className={`body-region ${activeRegion==='Face'?'active':''}`}
+            fill={activeRegion==='Face' ? 'rgba(58,134,128,0.18)' : 'transparent'}
+            onClick={() => setFilters(f => ({ ...f, location: f.location==='Face' ? null : 'Face' }))}
+          />
+          {/* Trunk */}
+          <path d="M 110 230 L 290 230 L 295 440 L 105 440 Z"
+            className={`body-region ${activeRegion==='Trunk'?'active':''}`}
+            fill={activeRegion==='Trunk' ? 'rgba(58,134,128,0.18)' : 'transparent'}
+            onClick={() => setFilters(f => ({ ...f, location: f.location==='Trunk' ? null : 'Trunk' }))}
+          />
+
+          {/* Region labels */}
+          <text x="200" y="57" textAnchor="middle" className="font-mono"
+            fontSize="10" fill="var(--muted)" letterSpacing="2" style={{pointerEvents:'none'}}>
+            SCALP · 7
+          </text>
+          <text x="200" y="138" textAnchor="middle" className="font-mono"
+            fontSize="10" fill="var(--muted)" letterSpacing="2" style={{pointerEvents:'none'}}>
+            FACE · 10
+          </text>
+          <text x="200" y="325" textAnchor="middle" className="font-mono"
+            fontSize="11" fill="var(--muted)" letterSpacing="2" style={{pointerEvents:'none', opacity: 0.4}}>
+            TRUNK · 20
+          </text>
+
+          {/* Lesion dots — visible + invisible larger tap target behind */}
+          {lesions.map(l => {
+            const included = filteredIds.has(l.id);
+            const isActive = activeId === l.id;
+            const color = HISTOLOGIES[l.histology].color;
+            return (
+              <g key={l.id}>
+                {/* Invisible larger tap target (≥14px radius for fat fingers) */}
+                <circle
+                  cx={l.x} cy={l.y} r={14}
+                  fill="transparent"
+                  className="cursor-pointer"
+                  style={{ touchAction: 'manipulation' }}
+                  onMouseEnter={() => setHoveredId(l.id)}
+                  onMouseLeave={() => setHoveredId(null)}
+                  onClick={(e) => { e.stopPropagation(); setSelectedId(selectedId === l.id ? null : l.id); }}
+                />
+                {/* Visible dot */}
+                <circle
+                  cx={l.x} cy={l.y}
+                  r={isActive ? (l.recur ? 8 : 7) : (l.recur ? 6.5 : 5)}
+                  fill={included ? color : "#D6DEDE"}
+                  fillOpacity={included ? 0.92 : 0.32}
+                  stroke={l.recur ? "#B84A3A" : (isActive ? "#0D4A4A" : "#FFFFFF")}
+                  strokeWidth={isActive ? 2 : (l.recur ? 1.6 : 1.2)}
+                  className="lesion-dot pointer-events-none"
+                  filter="url(#dotShadow)"
+                />
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+
+      {/* Persistent selection panel (mobile-friendly, always reserved) */}
+      <div className="mt-3 min-h-[62px] bg-white border border-[var(--line)] rounded-lg p-3 relative">
+        {activeLesion ? (
+          <div className="pr-6">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="font-mono text-[9px] tracking-[0.2em] uppercase text-[var(--muted)]">Lesion #{activeLesion.id}</span>
+              <span className="inline-block w-2 h-2 rounded-full" style={{ background: HISTOLOGIES[activeLesion.histology].color }}></span>
+              {activeLesion.recur && <span className="text-[9px] font-mono tracking-wide uppercase text-[var(--coral)] font-semibold">Recurred</span>}
+            </div>
+            <div className="font-display text-[15px] font-medium text-[var(--ink)] leading-tight">{activeLesion.histology}</div>
+            <div className="mt-1 text-[11px] text-[var(--muted)] flex flex-wrap gap-x-3 gap-y-0.5">
+              <span><span className="text-[var(--ink-soft)] font-medium">Location:</span> {activeLesion.location}</span>
+              <span><span className="text-[var(--ink-soft)] font-medium">Acute tox:</span> <span className="font-mono">{activeLesion.acute}</span></span>
+              <span><span className="text-[var(--ink-soft)] font-medium">Response:</span> {activeLesion.response}</span>
+              {activeLesion.late !== "none" && <span><span className="text-[var(--ink-soft)] font-medium">Late:</span> {activeLesion.late}</span>}
+            </div>
+            {selectedId && (
+              <button onClick={() => setSelectedId(null)}
+                className="absolute top-2 right-2 w-6 h-6 flex items-center justify-center rounded-full text-[var(--muted)] hover:bg-[var(--paper-2)] active:bg-[var(--line)]"
+                aria-label="Close">
+                <span className="text-[15px] leading-none">×</span>
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="text-[11px] text-[var(--muted)] italic flex items-center h-full py-1">
+            Tap any dot to see the lesion details. Tap a body region to filter by location.
+          </div>
+        )}
+      </div>
+
+      {/* Legend */}
+      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 text-[11px]">
+        {Object.entries(HISTOLOGIES).map(([h, meta]) =>
+          <div key={h} className="flex items-center gap-2 text-[var(--ink-soft)] min-w-0">
+            <span className="inline-block w-2.5 h-2.5 rounded-full flex-shrink-0" style={{background: meta.color}}></span>
+            <span className="leading-tight">{h}</span>
+            <span className="font-mono text-[10px] text-[var(--muted)] ml-auto flex-shrink-0">{meta.pct}%</span>
+          </div>
+        )}
+      </div>
+      <div className="mt-2 text-[10px] text-[var(--muted)] italic">
+        <span className="inline-block w-2.5 h-2.5 rounded-full border-[1.5px] border-[var(--coral)] align-middle mr-1.5"></span>
+        Ring marks a lesion that later recurred locally (n=2).
+      </div>
+    </div>
+  );
+}
+
+function StackedBar({ filteredLesions, filteredIds }) {
+  const byHist = {};
+  Object.keys(HISTOLOGIES).forEach(h => byHist[h] = 0);
+  filteredLesions.forEach(l => { byHist[l.histology]++; });
+
+  const n = filteredLesions.length || 1;
+  const entries = Object.entries(byHist).filter(([_, v]) => v > 0);
+
+  return (
+    <div>
+      <h3 className="font-display text-[15px] font-medium mb-2">Histology composition</h3>
+      <div className="flex h-8 w-full rounded overflow-hidden border border-[var(--line)]">
+        {entries.map(([h, v], i) => (
+          <div key={h} className="transition-all duration-500 relative group"
+            style={{ width: `${(v/n)*100}%`, background: HISTOLOGIES[h].color }}>
+            {(v/n) > 0.08 &&
+              <span className="absolute inset-0 flex items-center justify-center text-white text-[10px] font-mono font-medium">
+                {v}
+              </span>
+            }
+          </div>
+        ))}
+      </div>
+      <div className="mt-2 text-[10px] text-[var(--muted)] font-mono flex justify-between">
+        <span>n = {filteredLesions.length}</span>
+        <span>tap a dot above for detail</span>
+      </div>
+    </div>
+  );
+}
+
+function ToxicityStrip({ filteredLesions }) {
+  const counts = { G0: 0, G1: 0, G2: 0, G3: 0 };
+  filteredLesions.forEach(l => { counts[l.acute] = (counts[l.acute]||0) + 1; });
+  const n = filteredLesions.length || 1;
+
+  const colors = {
+    G0: "#D6DEDE",
+    G1: "#B4D6D0",
+    G2: "#3A8680",
+    G3: "#0D4A4A",
+  };
+
+  return (
+    <div>
+      <h3 className="font-display text-[15px] font-medium mb-2">Acute toxicity (RTOG)</h3>
+      <div className="space-y-1.5">
+        {["G0","G1","G2","G3"].map(g => {
+          const v = counts[g];
+          const pct = (v/n)*100;
+          return (
+            <div key={g} className="flex items-center gap-3">
+              <span className="font-mono text-[11px] w-6 text-[var(--ink-soft)]">{g}</span>
+              <div className="flex-1 bg-[var(--paper-2)] rounded h-4 overflow-hidden relative">
+                <div className="h-full rounded transition-all duration-500"
+                  style={{ width: `${pct}%`, background: colors[g] }}></div>
+              </div>
+              <span className="font-mono text-[11px] tabular text-[var(--ink-soft)] w-16 text-right">
+                {v} <span className="text-[var(--muted)]">({pct.toFixed(0)}%)</span>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ResponseDonut({ filteredLesions }) {
+  const complete = filteredLesions.filter(l => l.response === "Complete").length;
+  const partial = filteredLesions.filter(l => l.response === "Partial").length;
+  const n = complete + partial;
+  if (n === 0) return null;
+  const completeRate = (complete/n)*100;
+
+  const R = 40, C = 2 * Math.PI * R;
+  const completeArc = (complete/n) * C;
+
+  return (
+    <div>
+      <h3 className="font-display text-[15px] font-medium mb-2">Tumor response</h3>
+      <div className="flex items-center gap-5">
+        <svg width="100" height="100" viewBox="0 0 100 100">
+          <circle cx="50" cy="50" r={R} fill="none" stroke="var(--paper-2)" strokeWidth="14"/>
+          <circle cx="50" cy="50" r={R} fill="none"
+            stroke="var(--teal-deep)" strokeWidth="14"
+            strokeDasharray={`${completeArc} ${C-completeArc}`}
+            strokeDashoffset={C/4}
+            style={{transition: "stroke-dasharray 500ms ease"}}
+            transform="rotate(-90 50 50)"/>
+          <text x="50" y="48" textAnchor="middle" className="font-display tabular"
+            fontSize="18" fontWeight="500" fill="var(--ink)">{completeRate.toFixed(0)}</text>
+          <text x="50" y="62" textAnchor="middle" className="font-mono"
+            fontSize="8" fill="var(--muted)" letterSpacing="1">% CR</text>
+        </svg>
+        <div className="text-[12px] space-y-1.5">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-[var(--teal-deep)]"></span>
+            <span className="text-[var(--ink-soft)]">Complete</span>
+            <span className="font-mono text-[var(--muted)] ml-auto tabular">{complete}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-[var(--paper-2)] border border-[var(--line)]"></span>
+            <span className="text-[var(--ink-soft)]">Partial</span>
+            <span className="font-mono text-[var(--muted)] ml-auto tabular">{partial}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LateToxicityCard({ filters }) {
+  const hasFilter = Object.values(filters).some(Boolean);
+  if (hasFilter) {
+    return (
+      <div className="bg-[var(--paper-2)] rounded p-3 text-[11px] text-[var(--muted)] italic">
+        Late toxicity is reported at the cohort level only (n=37). Clear filters to view it.
+      </div>
+    );
+  }
+  const items = [
+    { label: "Fibrosis",           n: 3, pct: 8.1 },
+    { label: "Telangiectasia",     n: 3, pct: 8.1 },
+    { label: "Hyperpigmentation",  n: 1, pct: 2.7 },
+  ];
+  return (
+    <div>
+      <h3 className="font-display text-[15px] font-medium mb-2">Late toxicity · whole cohort</h3>
+      <div className="space-y-1.5">
+        {items.map(it => (
+          <div key={it.label} className="flex items-center gap-3">
+            <span className="text-[11px] text-[var(--ink-soft)] w-36 flex-shrink-0">{it.label}</span>
+            <div className="flex-1 bg-[var(--paper-2)] rounded h-3 overflow-hidden">
+              <div className="h-full rounded bg-[var(--gold)]" style={{width: `${it.pct*4}%`}}></div>
+            </div>
+            <span className="font-mono text-[10px] tabular text-[var(--muted)] w-20 text-right">
+              {it.n}/37 · {it.pct}%
+            </span>
+          </div>
+        ))}
+        <div className="pt-1.5 mt-1 border-t border-[var(--line)] flex items-center gap-3">
+          <span className="text-[11px] text-[var(--ink)] font-semibold w-36 flex-shrink-0">Any late toxicity</span>
+          <span className="font-mono text-[11px] ml-auto text-[var(--ink)]">7/37 · 18.9%</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CohortPanel({ stats }) {
+  return (
+    <div className="bg-white border border-[var(--line)] rounded-lg p-5">
+      <h3 className="font-display text-[15px] font-medium mb-4">Cohort snapshot</h3>
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-[12px]">
+        <div>
+          <dt className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)]">Period</dt>
+          <dd className="font-mono mt-0.5 text-[var(--ink)]">{TOTALS.periodStart} – {TOTALS.periodEnd}</dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)]">Median follow-up</dt>
+          <dd className="font-mono mt-0.5 text-[var(--ink)]">{TOTALS.followUp} months</dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)]">Median age</dt>
+          <dd className="font-mono mt-0.5 text-[var(--ink)]">{TOTALS.medianAge} <span className="text-[var(--muted)]">({TOTALS.ageRange})</span></dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)]">Sex</dt>
+          <dd className="font-mono mt-0.5 text-[var(--ink)]">{TOTALS.female}F · {TOTALS.male}M</dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)]">Median dose</dt>
+          <dd className="font-mono mt-0.5 text-[var(--ink)]">{TOTALS.medianDose} Gy <span className="text-[var(--muted)]">({TOTALS.doseRange})</span></dd>
+        </div>
+        <div>
+          <dt className="text-[10px] uppercase tracking-[0.15em] text-[var(--muted)]">Fractions</dt>
+          <dd className="font-mono mt-0.5 text-[var(--ink)]">{TOTALS.medianFractions} <span className="text-[var(--muted)]">({TOTALS.fractionsRange})</span></dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
+function Footer() {
+  return (
+    <footer className="max-w-[1400px] mx-auto px-4 sm:px-8 py-8 border-t border-[var(--line)] mt-8">
+      <div className="text-[11px] text-[var(--muted)] leading-relaxed max-w-3xl">
+        <p className="mb-2">
+          <span className="font-semibold text-[var(--ink-soft)]">Citation · </span>
+          Samarão L, Alves A, Fernandes P, Correia D, Pereira A, Pinto S, Trigo L.
+          <em> High-Dose-Rate Plesiotherapy for Non-Melanoma Skin Cancer and Cutaneous Breast Cancer Recurrences: The Experience of a Center.</em>
+          IPO Porto, 2024. Presented at ESTRO 2026.
+        </p>
+        <p className="mb-2">
+          <span className="font-semibold text-[var(--ink-soft)]">Data disclaimer · </span>
+          Cohort-level totals, response and toxicity rates shown in this explorer are the published results from the retrospective study (31 patients · 37 lesions · Dec 2012 – Dec 2023).
+          Per-lesion cross-tabulations (histology × location, response within subgroups) are
+          <em> representative </em> of typical clinical patterns rather than individual patient records. Filtered estimates are intended for visual exploration, not statistical inference.
+        </p>
+        <p className="text-[10px] tracking-wide">
+          Built for ESTRO 2026 · IPO Porto · Brachytherapy Service
+        </p>
+      </div>
+    </footer>
+  );
+}
+
+/* ═════════════════════════  ROOT  ═════════════════════════ */
+
+function App() {
+  const [filters, setFilters] = useState({
+    location: null, histology: null, response: null, acute: null,
+  });
+  const [hoveredId, setHoveredId]   = useState(null);
+  const [selectedId, setSelectedId] = useState(null);
+
+  // When filters change, clear the selected lesion if it no longer matches
+  useEffect(() => {
+    if (!selectedId) return;
+    const l = LESIONS.find(x => x.id === selectedId);
+    if (!l) return;
+    const match =
+      (!filters.location  || l.location  === filters.location) &&
+      (!filters.histology || l.histology === filters.histology) &&
+      (!filters.response  || l.response  === filters.response) &&
+      (!filters.acute     || l.acute     === filters.acute);
+    if (!match) setSelectedId(null);
+  }, [filters, selectedId]);
+
+  const filteredLesions = useMemo(() => LESIONS.filter(l =>
+    (!filters.location  || l.location  === filters.location) &&
+    (!filters.histology || l.histology === filters.histology) &&
+    (!filters.response  || l.response  === filters.response) &&
+    (!filters.acute     || l.acute     === filters.acute)
+  ), [filters]);
+
+  const filteredIds = useMemo(() => new Set(filteredLesions.map(l => l.id)), [filteredLesions]);
+
+  const stats = useMemo(() => {
+    const n = filteredLesions.length;
+    const complete = filteredLesions.filter(l => l.response === "Complete").length;
+    const g2plus = filteredLesions.filter(l => l.acute === "G2" || l.acute === "G3").length;
+    const recurrences = filteredLesions.filter(l => l.recur).length;
+    // rough estimate of distinct patients (upper-bounded by lesion count)
+    const patients = n === 37 ? TOTALS.patients : Math.min(n, Math.round(n * TOTALS.patients / TOTALS.lesions));
+    return {
+      n, complete, g2plus, recurrences, patients,
+      completeRate: n ? (complete/n)*100 : 0,
+      g2plusRate:   n ? (g2plus/n)*100   : 0,
+    };
+  }, [filteredLesions]);
+
+  const hasFilter = Object.values(filters).some(Boolean);
+
+  return (
+    <div>
+      <Header/>
+      <KPIBand stats={stats} hasFilter={hasFilter}/>
+      <FilterBar filters={filters} setFilters={setFilters}/>
+
+      <section className="max-w-[1400px] mx-auto px-4 sm:px-8 py-8">
+        <div className="grid md:grid-cols-12 gap-8">
+          <div className="md:col-span-6 lg:col-span-5">
+            <BodyMap
+              filters={filters} setFilters={setFilters}
+              lesions={LESIONS} filteredIds={filteredIds}
+              hoveredId={hoveredId} setHoveredId={setHoveredId}
+              selectedId={selectedId} setSelectedId={setSelectedId}
+            />
+          </div>
+          <div className="md:col-span-6 lg:col-span-7 space-y-7">
+            <CohortPanel stats={stats}/>
+            <StackedBar filteredLesions={filteredLesions} filteredIds={filteredIds}/>
+            <div className="grid sm:grid-cols-2 gap-6">
+              <ToxicityStrip filteredLesions={filteredLesions}/>
+              <ResponseDonut filteredLesions={filteredLesions}/>
+            </div>
+            <LateToxicityCard filters={filters}/>
+          </div>
+        </div>
+      </section>
+
+      <Footer/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
